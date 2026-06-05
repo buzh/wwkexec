@@ -1,0 +1,3 @@
+[Manager]
+ShutdownWatchdogSec=60s
+RebootWatchdogSec=60s

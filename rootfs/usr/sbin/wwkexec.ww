@@ -1,0 +1,84 @@
+#!/bin/sh
+
+set -eu
+
+LOCK=/run/wwkexec.lock
+exec 9>"$LOCK"
+flock -n 9 || { echo "wwkexec: already running (lock $LOCK held)" >&2; exit 1; }
+
+# --- preflight (failure here = exit 1, node stays up, watchdog NOT armed) ---
+command -v kexec >/dev/null || { echo "wwkexec: kexec-tools (kexec) not installed" >&2; exit 1; }
+command -v curl  >/dev/null || { echo "wwkexec: curl not installed" >&2; exit 1; }
+
+if [ -r /sys/kernel/kexec_load_disabled ] && \
+   [ "$(cat /sys/kernel/kexec_load_disabled)" != "0" ]; then
+    echo "wwkexec: kexec_load_disabled=1 (kernel will not accept a new image; cold reboot required to recover)" >&2
+    exit 1
+fi
+
+if [ -r /sys/kernel/security/lockdown ]; then
+    case "$(cat /sys/kernel/security/lockdown)" in
+        *'[integrity]'*|*'[confidentiality]'*)
+            echo "wwkexec: kernel lockdown blocks kexec_load (lockdown=$(cat /sys/kernel/security/lockdown))" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# --- parse wwid from /proc/cmdline (handles wwid=[iface] indirection) ---
+WWID=""
+for p in $(cat /proc/cmdline); do
+    case "$p" in
+        wwid=*) WWID="${p#wwid=}" ;;
+    esac
+done
+case "$WWID" in
+    \[*\])
+        iface="${WWID#[}"; iface="${iface%]}"
+        WWID="$(cat /sys/class/net/$iface/address)"
+        ;;
+esac
+[ -n "$WWID" ] || { echo "wwkexec: cannot determine wwid from /proc/cmdline" >&2; exit 1; }
+
+BASEURI="http://{{ .Ipaddr }}:{{ .Warewulf.Port }}/provision/${WWID}"
+
+WORKDIR="$(mktemp -d /tmp/wwkexec.XXXXXX)"
+
+# Arm kernel panic, retain original value 
+ORIG_PANIC="$(cat /proc/sys/kernel/panic 2>/dev/null || echo 0)"
+echo 10 > /proc/sys/kernel/panic 2>/dev/null || true
+trap 'echo "$ORIG_PANIC" > /proc/sys/kernel/panic 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
+
+# Fetch new image and overlays
+echo "wwkexec: fetching kernel from ${BASEURI}?stage=kernel"
+curl --fail --silent --show-error -o "$WORKDIR/kernel"    "${BASEURI}?stage=kernel"
+echo "wwkexec: fetching image (compressed)"
+curl --fail --silent --show-error -o "$WORKDIR/image.gz"  "${BASEURI}?stage=image&compress=gz"
+echo "wwkexec: fetching system overlay (compressed)"
+curl --fail --silent --show-error -o "$WORKDIR/system.gz" "${BASEURI}?stage=system&compress=gz"
+echo "wwkexec: fetching runtime overlay (compressed)"
+if ! curl --fail --silent --show-error -o "$WORKDIR/runtime.gz" "${BASEURI}?stage=runtime&compress=gz"; then
+    echo "wwkexec: runtime overlay unavailable (ignored)"
+    rm -f "$WORKDIR/runtime.gz"
+fi
+
+# Create new initrd
+cat "$WORKDIR/image.gz" "$WORKDIR/system.gz" > "$WORKDIR/initrd"
+[ -f "$WORKDIR/runtime.gz" ] && cat "$WORKDIR/runtime.gz" >> "$WORKDIR/initrd"
+
+CMDLINE="wwid=${WWID}{{ if and .Kernel .Kernel.Args }} {{ join " " .Kernel.Args }}{{ end }}"
+
+# Load new kernel (using legacy KEXEC_LOAD, for some reason KEXEC_FILE_LOAD fails on EL9.7)
+echo "wwkexec: loading new kernel"
+echo "  cmdline: ${CMDLINE}"
+kexec -c -l "$WORKDIR/kernel" --initrd="$WORKDIR/initrd" --command-line="$CMDLINE"
+
+# Arm reboot watchdog, if loading new image fails node will first try a reboot, then hard boot using sysrq
+WATCHDOG_SEC=600
+echo "wwkexec: arming fallback reboot watchdog (${WATCHDOG_SEC}s)"
+setsid sh -c "sleep $WATCHDOG_SEC; reboot -ff 2>/dev/null || (sleep 30; echo b > /proc/sysrq-trigger)" \
+    </dev/null >/dev/null 2>&1 &
+
+# Hand off to systemd
+echo "wwkexec: calling systemctl kexec"
+exec systemctl kexec

@@ -1,0 +1,12 @@
+[Unit]
+Description=Warewulf warm reboot via kexec
+DefaultDependencies=no
+RefuseManualStop=yes
+ConditionPathExists=/usr/sbin/wwkexec
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+TimeoutStartSec=900
+KillMode=process
+ExecStart=/bin/sh /usr/sbin/wwkexec
