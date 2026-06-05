@@ -10,3 +10,5 @@ RemainAfterExit=no
 TimeoutStartSec=900
 KillMode=process
 ExecStart=/bin/sh /usr/sbin/wwkexec
+StandardOutput=journal+console
+StandardError=journal+console
