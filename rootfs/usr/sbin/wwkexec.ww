@@ -49,17 +49,21 @@ ORIG_PANIC="$(cat /proc/sys/kernel/panic 2>/dev/null || echo 0)"
 echo 10 > /proc/sys/kernel/panic 2>/dev/null || true
 trap 'echo "$ORIG_PANIC" > /proc/sys/kernel/panic 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
 
-# Fetch new image and overlays
-echo "wwkexec: fetching kernel from ${BASEURI}?stage=kernel"
-curl --fail --silent --show-error -o "$WORKDIR/kernel"    "${BASEURI}?stage=kernel"
-echo "wwkexec: fetching image (compressed)"
-curl --fail --silent --show-error -o "$WORKDIR/image.gz"  "${BASEURI}?stage=image&compress=gz"
-echo "wwkexec: fetching system overlay (compressed)"
-curl --fail --silent --show-error -o "$WORKDIR/system.gz" "${BASEURI}?stage=system&compress=gz"
-echo "wwkexec: fetching runtime overlay (compressed)"
-if ! curl --fail --silent --show-error -o "$WORKDIR/runtime.gz" "${BASEURI}?stage=runtime&compress=gz"; then
-    echo "wwkexec: runtime overlay unavailable (ignored)"
-    rm -f "$WORKDIR/runtime.gz"
+echo "wwkexec: fetching kernel, image, system, runtime overlays in parallel"
+
+curl --fail --silent --show-error -o "$WORKDIR/kernel"    "${BASEURI}?stage=kernel"               & PID_KERNEL=$!
+curl --fail --silent --show-error -o "$WORKDIR/image.gz"  "${BASEURI}?stage=image&compress=gz"    & PID_IMAGE=$!
+curl --fail --silent --show-error -o "$WORKDIR/system.gz" "${BASEURI}?stage=system&compress=gz"   & PID_SYSTEM=$!
+curl --fail --silent --show-error -o "$WORKDIR/runtime.gz" "${BASEURI}?stage=runtime&compress=gz" & PID_RUNTIME=$!
+
+rc=0; wait "$PID_KERNEL"  || rc=$?; [ "$rc" -eq 0 ] || { echo "wwkexec: kernel fetch failed"  >&2; exit 1; }
+rc=0; wait "$PID_IMAGE"   || rc=$?; [ "$rc" -eq 0 ] || { echo "wwkexec: image fetch failed"   >&2; exit 1; }
+rc=0; wait "$PID_SYSTEM"  || rc=$?; [ "$rc" -eq 0 ] || { echo "wwkexec: system fetch failed"  >&2; exit 1; }
+rc=0; wait "$PID_RUNTIME" || rc=$?
+
+if [ "$rc" -ne 0 ]; then
+echo "wwkexec: runtime overlay unavailable (ignored)"
+rm -f "$WORKDIR/runtime.gz"
 fi
 
 # Create new initrd
