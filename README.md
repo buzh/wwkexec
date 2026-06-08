@@ -30,7 +30,9 @@ In slurm.conf set:
 ...or write a wrapper script that takes any additional steps you might need.
 
 Configure the nodes to load this image, then:
+
 `wwctl overlay build` (optional but recommended - if you don't, the old image name will be displayed by /etc/issue by default)
+
 `scontrol reboot asap <node(s)>`
 
 That's it! Sit back and watch the new image be rolled out.
